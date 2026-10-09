@@ -1,0 +1,32 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.coverage
+htmlcov/
+result/
+logs/
+
+# Credentials and private keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+credentials.json
+credentials.yaml
+credentials.yml
+secrets.json
+secrets.yaml
+secrets.yml
+
+# Local state, backups, and editor files
+*.bak
+*.orig
+*.swp
+*.swo
+*.tmp
+.DS_Store
+.vscode/
