@@ -302,13 +302,14 @@ class LessonGenerator:
         except OSError as exc:
             raise LessonError("Prompt file could not be read.") from exc
         prompt = render_prompt(template, self.config, news_items)
+        base_prompt = prompt
         last_error: LessonError | None = None
         for _ in range(MAX_GENERATION_ATTEMPTS):
             try:
                 markdown = self._request(prompt)
             except InvalidModelResponse as exc:
                 last_error = exc
-                prompt += "\n\nThe previous API response was invalid. Return a complete lesson as plain Markdown only."
+                prompt = base_prompt + "\n\nThe previous API response was invalid. Return a complete lesson as plain Markdown only."
                 continue
             try:
                 word_count = validate_lesson(markdown, news_items)
@@ -316,5 +317,12 @@ class LessonGenerator:
                 return markdown, word_count
             except LessonError as exc:
                 last_error = exc
-                prompt += "\n\nYour previous draft did not meet this validation rule: " + str(exc) + ". Revise the complete lesson and return only corrected Markdown."
+                # 이전 초안을 함께 주어 처음부터 다시 쓰지 않고 수정하게 한다.
+                prompt = (
+                    base_prompt
+                    + "\n\nYour previous draft did not meet this validation rule: " + str(exc)
+                    + " Revise that draft and return only the complete corrected Markdown.\n\n<previous_draft>\n"
+                    + markdown
+                    + "\n</previous_draft>"
+                )
         raise last_error or LessonError("Could not generate a valid lesson.")

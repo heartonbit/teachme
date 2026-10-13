@@ -12,7 +12,7 @@ from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 from teachme.cli import _lesson_filename, _parse_date, execute, parse_args, send_test_email
-from teachme.collectors import NewsCollector, deduplicate_items
+from teachme.collectors import CollectionError, NewsCollector, deduplicate_items
 from teachme.config import AppConfig, ConfigurationError, load_config
 from teachme.lesson import LessonError, LessonGenerator, add_lesson_metadata, populate_sources_section, render_prompt, validate_lesson
 from teachme.models import NewsItem, Source, SourceReference
@@ -195,6 +195,160 @@ class CollectorTests(unittest.TestCase):
 
             collector = NewsCollector(config, opener=lambda request, timeout: FakeResponse())
             self.assertEqual(collector.collect_source(source), [])
+
+    def test_html_source_selects_prominent_headlines_and_reads_article_bodies(self) -> None:
+        listing_url = "https://news.example/world"
+        listing = b"""<!doctype html><html><body>
+        <nav><a href="/news/navigation">Navigation link with a headline-looking title</a></nav>
+        <main>
+          <article class="featured-story"><h2><a href="/news/top-story">Government announces major climate plan for the country</a></h2></article>
+          <article class="latest"><h2><a href="/news/second-story">Parliament approves new national transport funding plan</a></h2></article>
+          <article><h2><a href="/news/third-story">Local team wins its regional championship final</a></h2></article>
+          <a href="https://external.example/news">External report with a sufficiently long headline</a>
+        </main>
+        </body></html>"""
+        article_pages = {
+            "https://news.example/news/top-story": (
+                "Top report",
+                b"<html><body><nav>Navigation must not appear in article text</nav><main><article><h1>Top report</h1>"
+                b"<p>Officials announced a major climate plan today. The proposal includes new investment in clean energy, public transport, and building improvements across the country. Ministers said the program will begin next year after a public review. Opposition lawmakers asked for details about the cost, while environmental groups welcomed the targets and requested faster action.</p>"
+                b"<script>script text must not appear</script></article></main></body></html>",
+            ),
+            "https://news.example/news/second-story": (
+                "Transport funding",
+                b"<html><body><main><article><p>Parliament approved a national transport funding plan after a long debate. The measure provides money for railway repairs, regional bus services, and safer stations. The transport ministry will publish a schedule next month. Several local councils said they need more information before planning projects. The government expects the first work to begin next spring.</p></article></main></body></html>",
+            ),
+        }
+        requested: list[str] = []
+
+        class FakeResponse:
+            def __init__(self, url: str, body: bytes, content_type: str):
+                self.url = url
+                self.body = body
+                self.headers = {"Content-Type": content_type}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self, size=-1):
+                return self.body
+
+            def geturl(self):
+                return self.url
+
+        def opener(request, timeout):
+            url = request.full_url
+            requested.append(url)
+            if url == listing_url:
+                return FakeResponse(url, listing, "text/html; charset=utf-8")
+            _, body = article_pages[url]
+            return FakeResponse(url, body, "text/html; charset=utf-8")
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = build_config(Path(directory))
+            config = AppConfig(**{**config.__dict__, "max_articles_per_source": 2, "sources": (Source("demo", "Demo News", listing_url),)})
+            items = NewsCollector(config, opener=opener).collect_source(config.sources[0])
+
+        self.assertEqual([item.title for item in items], [
+            "Government announces major climate plan for the country",
+            "Parliament approves new national transport funding plan",
+        ])
+        self.assertEqual(len(requested), 3)
+        self.assertIn("clean energy", items[0].summary)
+        self.assertNotIn("Navigation must not appear", items[0].summary)
+        self.assertNotIn("script text", items[0].summary)
+        self.assertEqual(items[0].sources[0].url, "https://news.example/news/top-story")
+
+    def test_html_listing_without_article_headlines_reports_clear_error(self) -> None:
+        class FakeResponse:
+            headers = {"Content-Type": "text/html"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self, size=-1):
+                return b"<html><body><nav><a href='/x'>Short</a></nav></body></html>"
+
+            def geturl(self):
+                return "https://news.example/"
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = build_config(Path(directory))
+            source = Source("demo", "Demo News", "https://news.example/")
+            collector = NewsCollector(config, opener=lambda request, timeout: FakeResponse())
+            with self.assertRaisesRegex(CollectionError, "No same-site news headlines"):
+                collector.collect_source(source)
+
+    def test_brussels_times_public_api_collects_front_articles_and_bodies(self) -> None:
+        source = Source("brusselstimes", "The Brussels Times", "https://www.brusselstimes.com/")
+        listing = {
+            "listed": [
+                {"id": 101, "type": "article", "title": "Government announces major climate plan for Belgium", "slug": "climate-plan-belgium", "categories": ["belgium"]},
+                {"id": 105, "type": "article", "title": "Government announces major climate plan for Belgium today", "slug": "climate-plan-belgium-today", "categories": ["belgium"]},
+                {"id": 102, "type": "article", "title": "Police unions call for action after Brussels protest", "slug": "police-unions-brussels-protest", "categories": ["brussels"]},
+                {"id": 103, "type": "article", "title": "Premium news", "slug": "premium-news", "plus": True},
+                {"id": 104, "type": "article", "title": "Third news", "slug": "third-news", "categories": ["world"]},
+            ]
+        }
+        article_text = (
+            "<article><h1>Article heading</h1><p>Officials announced a new measure today after a meeting in Brussels. "
+            "The plan includes additional public funding, a review period, and regular reports from the responsible ministry. "
+            "Local groups welcomed the announcement and asked officials to publish further details next week.</p></article>"
+        )
+        requested: list[str] = []
+
+        class FakeResponse:
+            headers = {"Content-Type": "application/json"}
+
+            def __init__(self, payload):
+                self.payload = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self, size=-1):
+                return self.payload
+
+            def geturl(self):
+                return requested[-1]
+
+        def opener(request, timeout):
+            requested.append(request.full_url)
+            if request.full_url == source.url:
+                return FakeResponse(b"<html><body><app-root></app-root></body></html>")
+            if request.full_url.endswith("/front"):
+                return FakeResponse(listing)
+            article_id = int(request.full_url.rsplit("=", 1)[1])
+            return FakeResponse({
+                "id": article_id,
+                "title": f"Top news {1 if article_id == 101 else 2}",
+                "slug": f"top-news-{1 if article_id == 101 else 2}",
+                "published": "2026-10-11 12:30:00",
+                "categories": ["belgium" if article_id == 101 else "brussels"],
+                "content": article_text,
+            })
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = build_config(Path(directory))
+            config = AppConfig(**{**config.__dict__, "max_articles_per_source": 2})
+            items = NewsCollector(config, opener=opener).collect_source(source)
+
+        self.assertEqual([item.title for item in items], ["Top news 1", "Top news 2"])
+        self.assertEqual(len(requested), 4)
+        self.assertTrue(requested[1].endswith("/front"))
+        self.assertFalse(any("id=105" in url for url in requested))
+        self.assertIn("responsible ministry", items[0].summary)
+        self.assertEqual(items[0].url, "https://www.brusselstimes.com/belgium/101/top-news-1")
+        self.assertEqual(items[0].published_at, "2026-10-11T12:30:00+00:00")
 
     def test_deduplicate_url_and_near_identical_title_preserving_sources(self) -> None:
         first = build_item("Government announces new climate plan for the country", "https://news.test/story?utm_source=a")
@@ -525,6 +679,9 @@ class LLMRequestTests(unittest.TestCase):
         self.assertEqual(word_count, 300)
         self.assertEqual(len(calls), 2)
         self.assertIn("received 248. Aim for about 300 words.", calls[1])
+        self.assertIn("<previous_draft>", calls[1])
+        self.assertIn("word247", calls[1])
+        self.assertEqual(calls[1].count("Your previous draft did not meet"), 1)
 
     def test_malformed_model_response_is_retried_once(self) -> None:
         class FakeResponse:
@@ -665,8 +822,12 @@ class MailSettingsTests(unittest.TestCase):
     def test_recipients_and_sender_defaults_load(self) -> None:
         config = self.load(NOTIFY_EMAIL="a@example.com, b@example.com;a@example.com", RESEND_API_KEY="re_test")
         self.assertEqual(config.mail_to, ("a@example.com", "b@example.com"))
-        self.assertEqual((config.mail_from, config.resend_api_key), ("onboarding@resend.dev", "re_test"))
+        self.assertEqual((config.mail_from, config.resend_api_key), ("Teach Me <onboarding@resend.dev>", "re_test"))
         self.assertEqual(self.load(NOTIFY_EMAIL="a@example.com", RESEND_API_KEY="re_test", MAIL_FROM="bot@mydomain.com").mail_from, "bot@mydomain.com")
+        self.assertEqual(
+            self.load(NOTIFY_EMAIL="a@example.com", RESEND_API_KEY="re_test", MAIL_FROM="Teach Me <onboarding@resend.dev>").mail_from,
+            "Teach Me <onboarding@resend.dev>",
+        )
 
     def test_invalid_mail_settings_are_rejected_before_any_network_call(self) -> None:
         good = {"NOTIFY_EMAIL": "a@example.com", "RESEND_API_KEY": "re_test"}
@@ -675,7 +836,8 @@ class MailSettingsTests(unittest.TestCase):
             ({**good, "NOTIFY_EMAIL": ",".join(f"u{i}@example.com" for i in range(51))}, "at most 50"),
             ({**good, "RESEND_API_KEY": ""}, "RESEND_API_KEY"),
             ({**good, "RESEND_API_KEY": "re bad key"}, "RESEND_API_KEY"),
-            ({**good, "MAIL_FROM": "Bot <bot@example.com>"}, "MAIL_FROM"),
+            ({**good, "MAIL_FROM": "Bot <not-an-address>"}, "MAIL_FROM"),
+            ({**good, "MAIL_FROM": "Teach Me <bot@example.com>\nBcc:evil@example.com"}, "control characters"),
         ]
         for values, expected in cases:
             with self.subTest(expected=expected):

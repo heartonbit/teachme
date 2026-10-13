@@ -20,7 +20,7 @@ DEFAULT_SOURCES = [
 ]
 CEFR_LEVELS = {"A1", "A2", "B1", "B2", "C1", "C2"}
 EMAIL_PATTERN = re.compile(r"[^@\s,;<>\"']+@[^@\s,;<>\"']+\.[^@\s,;<>\"']+")
-DEFAULT_MAIL_FROM = "onboarding@resend.dev"
+DEFAULT_MAIL_FROM = "Teach Me <onboarding@resend.dev>"
 
 
 class ConfigurationError(ValueError):
@@ -188,8 +188,14 @@ def _load_mail_settings() -> dict[str, object]:
     if not api_key or re.search(r"\s", api_key):
         raise ConfigurationError("RESEND_API_KEY is required when NOTIFY_EMAIL is set.")
     sender = os.environ.get("MAIL_FROM", "").strip() or DEFAULT_MAIL_FROM
-    if not EMAIL_PATTERN.fullmatch(sender):
-        raise ConfigurationError("MAIL_FROM must be a plain email address.")
+    if any(ord(character) < 32 or ord(character) == 127 for character in sender):
+        raise ConfigurationError("MAIL_FROM must not contain control characters.")
+    mailbox = re.fullmatch(r"(?:(?P<name>[^<>]+?)\s*)?<(?P<address>[^<>]+)>", sender)
+    sender_address = mailbox.group("address").strip() if mailbox else sender
+    if not EMAIL_PATTERN.fullmatch(sender_address):
+        raise ConfigurationError("MAIL_FROM must be an email address or a display name followed by an email address.")
+    if mailbox and not mailbox.group("name").strip():
+        raise ConfigurationError("MAIL_FROM display name must not be empty.")
 
     return {"mail_to": recipients, "mail_from": sender, "resend_api_key": api_key}
 

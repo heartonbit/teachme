@@ -104,7 +104,9 @@ result/
 
 `<언어>.md`의 Reading은 250-350단어를 목표로 하고 어휘·질문·답안을 포함한 전체 자료는 약 3-5분 안에 학습할 수 있어야 한다. 다이제스트의 핵심 내용과 출처 링크를 연결해 표시한다. `Sources` 목록은 누락을 막기 위해 모델 응답이 아닌 수집 메타데이터에서 애플리케이션이 렌더링한다. 실행 요약 JSON은 최소한 `run_id`, `started_at`, `finished_at`, `date`, `timezone`, `language`, `level`, `model`, `prompt_file`, `prompt_version`, `counts`(discovered/deduplicated/generated/skipped/failed; `generated`는 0 또는 1), `sources`(각 ID와 상태·수집 건수·안전한 오류 코드)를 기록한다. `deduplicated`는 중복 제거 후 남은 고유 뉴스 수다. API 키와 기사 전문은 기록하지 않는다.
 
-현재 수집기는 RSS/Atom 피드 URL을 직접 지정하거나 설정된 공개 페이지에서 `<link rel="alternate">` 피드 링크를 찾는다. 일반 HTML 기사 목록을 직접 파싱하는 사이트별 수집기는 아직 구현되지 않았다. 공개 피드를 제공하지 않는 출처는 실행 요약에 수집 실패로 남으며, 해당 사이트의 피드 URL을 `NEWS_SOURCES_JSON`에 지정해야 한다.
+수집기는 RSS/Atom 피드 URL과 설정된 공개 페이지의 `<link rel="alternate">` 피드를 우선 사용한다. 피드가 없으면 공개 HTML 페이지에서 제목 길이, heading/article 구조, `featured`·`top`·`breaking` 등의 대표 기사 표시를 이용해 같은 사이트의 기사 링크를 최대 `MAX_ARTICLES_PER_SOURCE`개 고르고 본문 텍스트를 가져온다. 본문은 기사별 최대 6,000자이며 이후 전체 프롬프트 한도에 따라 추가 축약될 수 있다. navigation/footer 링크와 다른 호스트로 연결되는 목록 링크는 후보에서 제외한다. 로그인·유료벽·접근통제를 우회하지 않는다. 페이지에서 후보나 읽을 수 있는 본문을 찾지 못하면 해당 출처는 실행 요약에 수집 실패로 기록된다.
+
+The Brussels Times 공개 프런트 페이지는 Angular shell이므로 전용 공개 API adapter를 사용한다. `https://apiv2.brusselstimes.com/front`의 `listed` 항목 제목을 끝까지 훑고, 제목 유사도 기준 0.86 이상인 중복 후보와 프리미엄 항목을 제외한 뒤 원래 편집 순서의 상위 `MAX_ARTICLES_PER_SOURCE`개를 고른다. 각 선택 항목의 ID로 `/article?id=...`를 요청해 본문과 게시 시각을 가져온다. 인증이나 접근통제를 우회하지 않는다.
 
 ## 4. 로그 형식
 
